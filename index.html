@@ -504,6 +504,34 @@ let userCbs=[];
 OS.user=()=>{const p=curProfile();return{name:p.name,avatar:p.avatar}};
 OS.onUser=cb=>userCbs.push(cb);
 
+/* ---- shared "ultra AI" key (optional, user-supplied; powers BOTH the Fry City AI
+   chatbot and the Dream Lab when present). Stored only on this computer, never shipped. ---- */
+const AI_KEY='frycityos-ai-key',AI_MODEL='frycityos-ai-model';
+OS.aiKey=()=>{try{return localStorage.getItem(AI_KEY)||''}catch(e){return''}};
+OS.setAiKey=v=>{try{v=(v||'').trim();v?localStorage.setItem(AI_KEY,v):localStorage.removeItem(AI_KEY)}catch(e){}};
+OS.aiModel=()=>{try{return localStorage.getItem(AI_MODEL)||'claude-opus-4-8'}catch(e){return'claude-opus-4-8'}};
+OS.setAiModel=v=>{try{localStorage.setItem(AI_MODEL,v)}catch(e){}};
+OS.hasUltra=()=>!!OS.aiKey();
+/* one call to Claude (Anthropic Messages API, direct from the browser with the user's key). */
+OS.claudeChat=async function(opts){const key=OS.aiKey();if(!key)throw new Error('nokey');
+ const ctrl=('AbortController'in window)?new AbortController():null;
+ const tm=setTimeout(()=>{if(ctrl)ctrl.abort()},opts.timeout||60000);
+ let res;
+ try{res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+   headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01',
+    'anthropic-dangerous-direct-browser-access':'true'},
+   body:JSON.stringify({model:opts.model||OS.aiModel(),max_tokens:opts.max_tokens||1024,
+    system:opts.system,messages:opts.messages}),signal:ctrl?ctrl.signal:undefined})}
+ catch(e){clearTimeout(tm);throw new Error('net')}
+ clearTimeout(tm);
+ const data=await res.json().catch(()=>({}));
+ if(!res.ok){const t=(data&&data.error&&data.error.type)||'';
+  if(t==='authentication_error'||t==='permission_error')throw new Error('key');
+  if(t==='rate_limit_error'||t==='overloaded_error')throw new Error('busy');
+  throw new Error('api')}
+ let txt='';(data.content||[]).forEach(b=>{if(b.type==='text')txt+=b.text});
+ return txt.trim()};
+
 /* ================================================================
    SOUNDS — tiny webaudio synth; names are part of the API contract
    ================================================================ */
@@ -5167,32 +5195,45 @@ FACT.mystery=(api,spec)=>{const m=head(api,spec,'nobody knows what this does');
   if(Math.random()<.12){OS.sound('honk');OS.toast('🪿 the goose was inside the machine?!')}}};
 
 /* ---------------- ONLINE engine (real AI via the Claude API) ---------------- */
-const AIKEY='frycityos-dream-aikey',AIMODEL='frycityos-dream-aimodel';
-const getKey=()=>{try{return localStorage.getItem(AIKEY)||''}catch(e){return''}};
-const setKey=v=>{try{localStorage.setItem(AIKEY,v)}catch(e){}};
-const getModel=()=>{try{return localStorage.getItem(AIMODEL)||'claude-sonnet-4-6'}catch(e){return'claude-sonnet-4-6'}};
-const setModel=v=>{try{localStorage.setItem(AIMODEL,v)}catch(e){}};
 async function dreamOnline(name){
- const res=await fetch('https://api.anthropic.com/v1/messages',{
-  method:'POST',
-  headers:{'Content-Type':'application/json','x-api-key':getKey(),
-   'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-  body:JSON.stringify({model:getModel(),max_tokens:16000,
-   system:'You build tiny self-contained HTML mini-apps for a kids\' toy operating system called Fry City OS. '
-    +'Return ONLY a complete single HTML file (doctype to </html>), no markdown fences, no commentary. '
-    +'Rules: everything inline (CSS+JS), no external resources or network calls, works inside a sandboxed iframe, '
-    +'kid-appropriate (target age 8-12, nothing scary/violent/rude), playful rounded look, bright friendly colors, '
-    +'chunky buttons, an emoji or two, must actually WORK as the requested app. Keep it under ~250 lines.',
-   messages:[{role:'user',content:'Dream up this mini-app: "'+name+'"'}]})});
+ const sys='You build a tiny self-contained HTML mini-app for a kids toy OS called Fry City OS (ages 8-12). '
+  +'Output ONLY one complete HTML file (from <!doctype html> to </html>) — no markdown fences, no commentary. '
+  +'Everything inline (CSS+JS), NO external resources or network calls, runs in a sandboxed iframe. '
+  +'Wholesome and kid-appropriate (nothing scary/violent/rude), bright playful rounded look, chunky buttons, '
+  +'a couple of emoji, and it must actually WORK as the requested app. Keep it under ~220 lines.';
+ const ctrl=('AbortController'in window)?new AbortController():null;
+ const tm=setTimeout(()=>{if(ctrl)ctrl.abort()},48000);
+ let res;
+ try{res=await fetch('https://text.pollinations.ai/openai',{method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({model:'openai',temperature:.85,seed:hash(name)%100000,
+    messages:[{role:'system',content:sys},
+     {role:'user',content:'Dream up this mini-app: "'+name+'". Remember: reply with ONLY the HTML file.'}]}),
+   signal:ctrl?ctrl.signal:undefined})}
+ catch(e){clearTimeout(tm);throw new Error('net')}
+ clearTimeout(tm);
+ if(res.status===429)throw new Error('busy');
+ if(!res.ok)throw new Error('api');
  const data=await res.json();
- if(!res.ok){const t=(data&&data.error&&data.error.type)||'error';
-  if(t==='authentication_error')throw new Error('key');
-  if(t==='rate_limit_error'||t==='overloaded_error')throw new Error('busy');
-  throw new Error((data&&data.error&&data.error.message)||'api')}
- let html='';(data.content||[]).forEach(b=>{if(b.type==='text')html+=b.text});
+ let html=(data&&data.choices&&data.choices[0]&&data.choices[0].message&&data.choices[0].message.content)||'';
  html=html.replace(/^```(html)?\s*/i,'').replace(/```\s*$/,'').trim();
- if(html.toLowerCase().indexOf('<html')<0)throw new Error('shape');
- return html}
+ const lc=html.toLowerCase(),s=lc.indexOf('<!doctype'),s2=lc.indexOf('<html'),cut=s>=0?s:(s2>=0?s2:-1);
+ if(cut<0)throw new Error('shape');
+ return html.slice(cut)}
+/* ---------------- ULTRA engine — best apps via the user's own AI key (Claude) ---------------- */
+async function dreamUltra(name){
+ const sys='You build a polished, self-contained HTML mini-app for a kids toy OS called Fry City OS (ages 8-12). '
+  +'Output ONLY one complete HTML file (from <!doctype html> to </html>) — no markdown fences, no commentary. '
+  +'Everything inline (CSS+JS), NO external resources or network calls, runs in a sandboxed iframe. '
+  +'Wholesome and kid-appropriate (nothing scary/violent/rude). Make it delightful: a playful rounded design, '
+  +'bright friendly colours, chunky buttons, smooth little animations and sound where it fits, a couple of emoji — '
+  +'and it must actually WORK really well as the requested app.';
+ let html=await OS.claudeChat({system:sys,max_tokens:16000,timeout:90000,
+  messages:[{role:'user',content:'Dream up this mini-app: "'+name+'". Reply with ONLY the complete HTML file.'}]});
+ html=html.replace(/^```(html)?\s*/i,'').replace(/```\s*$/,'').trim();
+ const lc=html.toLowerCase(),s=lc.indexOf('<!doctype'),s2=lc.indexOf('<html'),cut=s>=0?s:(s2>=0?s2:-1);
+ if(cut<0)throw new Error('shape');
+ return html.slice(cut)}
 function renderOnlineApp(api,spec){
  const html=OS.store.get('dream-html-'+spec.slug,null);
  api.body.style.overflow='hidden';
@@ -5209,8 +5250,8 @@ function makeSpec(name,mode){const t=themeOf(name);
   words:t.words,emo:t.emo,accent:t.accent,noun:t.noun}}
 function registerDream(spec){
  OS.register({id:'dream-'+spec.slug,name:spec.name,icon:spec.emo[0],desktop:true,singleton:true,
-  width:spec.mode==='online'?640:520,height:spec.mode==='online'?540:480,
-  launch(api){if(spec.mode==='online')renderOnlineApp(api,spec);
+  width:spec.mode!=='offline'?640:520,height:spec.mode!=='offline'?540:480,
+  launch(api){if(spec.mode!=='offline')renderOnlineApp(api,spec);
    else (FACT[spec.arch]||FACT.mystery)(api,spec)}})}
 const dreams=()=>OS.store.get('dreamApps',[]);
 function syncDreams(){
@@ -5232,16 +5273,11 @@ launch(api){
    <div style="display:flex;gap:8px;margin-top:10px;max-width:430px;margin-left:auto;margin-right:auto">
     <input class="ptext" data-dl="in" style="flex:1" maxlength="40" placeholder="dream up ANY app… (dog piano?)">
     <button class="pbtn" data-dl="go">✨ Dream it!</button></div>
-   <div style="font-family:var(--head);font-size:11.5px;margin-top:9px">
-    <label style="cursor:pointer"><input type="radio" name="dlmode" value="offline" checked> 🌙 offline dreams (instant)</label>
-    &nbsp;&nbsp;<label style="cursor:pointer"><input type="radio" name="dlmode" value="online"> ☁️ online dreams (real AI)</label></div>
-   <div data-dl="aibox" style="display:none;margin-top:8px;font-family:var(--head);font-size:11.5px">
-    <input class="ptext" data-dl="key" type="password" style="width:300px;font-size:12px" placeholder="grown-up's Claude API key (sk-ant-…)">
-    <select data-dl="model" class="ptext" style="font-size:12px;padding:6px">
-     <option value="claude-sonnet-4-6">dream dragon (Sonnet)</option>
-     <option value="claude-haiku-4-5">budget dragon (Haiku)</option>
-     <option value="claude-opus-4-8">royal dragon (Opus)</option></select>
-    <div style="color:var(--mut);margin-top:4px">⚠️ ask a grown-up · the key stays on this computer · costs real money per dream</div></div>
+   <div style="font-family:var(--head);font-size:11.5px;margin-top:9px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+    <label style="cursor:pointer"><input type="radio" name="dlmode" value="offline" checked> 🌙 offline (instant)</label>
+    <label style="cursor:pointer"><input type="radio" name="dlmode" value="online"> ☁️ free online</label>
+    <label style="cursor:pointer"><input type="radio" name="dlmode" value="ultra"> ⭐ ultra (your key)</label></div>
+   <div data-dl="aibox" style="display:none;margin-top:8px;font-family:var(--head);font-size:11.5px;color:var(--mut);max-width:440px;margin-left:auto;margin-right:auto"></div>
   </div>
   <div data-dl="stage" style="flex:0 0 auto;padding:6px 16px;min-height:74px"></div>
   <div style="flex:1;overflow:auto;padding:4px 16px 14px">
@@ -5249,18 +5285,37 @@ launch(api){
    <div data-dl="shelf" style="display:flex;flex-wrap:wrap;gap:8px"></div></div></div>`;
  const $d=s=>api.body.querySelector(s);
  const inp=$d('[data-dl="in"]'),stage=$d('[data-dl="stage"]'),shelf=$d('[data-dl="shelf"]');
- $d('[data-dl="key"]').value=getKey();
- $d('[data-dl="model"]').value=getModel();
- $d('[data-dl="key"]').addEventListener('input',e=>setKey(e.target.value.trim()));
- $d('[data-dl="model"]').addEventListener('change',e=>setModel(e.target.value));
- api.body.querySelectorAll('[name="dlmode"]').forEach(r=>r.addEventListener('change',()=>{
-  $d('[data-dl="aibox"]').style.display=api.body.querySelector('[name="dlmode"]:checked').value==='online'?'block':'none'}));
+ const curMode=()=>api.body.querySelector('[name="dlmode"]:checked').value;
+ function renderAibox(){const box=$d('[data-dl="aibox"]'),m=curMode();
+  if(m==='online'){box.style.display='block';
+   box.innerHTML='☁️ a FREE dream-cloud on the internet — no key, no cost! takes a few seconds &amp; needs Wi-Fi. busy? just try again (or use 🌙 offline).'}
+  else if(m==='ultra'){box.style.display='block';
+   let grown=false;try{grown=localStorage.getItem('frycityos-grownup')==='1'}catch(e){}
+   const modelOpts='<option value="claude-opus-4-8">⭐ royal dragon (best)</option>'
+    +'<option value="claude-sonnet-4-6">dream dragon (faster)</option>'
+    +'<option value="claude-haiku-4-5">budget dragon (cheapest)</option>';
+   box.innerHTML='<label style="cursor:pointer;display:inline-block;margin-bottom:6px"><input type="checkbox" data-dl="grown"'+(grown?' checked':'')+'> 👤 I\'m a grown-up</label>'
+    +(grown
+      ?'<div style="margin-bottom:6px">⭐ <b>Ultra dreams</b> use your own Anthropic API key for the very best apps. Get one at <b>console.anthropic.com</b> — it stays on this computer, and each dream costs a little.</div>'
+       +'<input class="ptext" data-dl="key" type="password" style="width:270px;font-size:12px" placeholder="sk-ant-…" autocomplete="off">'
+       +'<select data-dl="model" class="ptext" style="font-size:12px;padding:6px;margin-left:5px">'+modelOpts+'</select>'
+       +'<div data-dl="keystat" style="margin-top:5px;font-weight:700"></div>'
+      :'<div>⭐ <b>Ultra dreams</b> make the very best apps — but they need a grown-up\'s AI key. If you\'re a grown-up, tick the box above to set it up. (Otherwise ☁️ free online and 🌙 offline are great too!)</div>');
+   $d('[data-dl="grown"]').addEventListener('change',e=>{try{localStorage.setItem('frycityos-grownup',e.target.checked?'1':'0')}catch(_){}renderAibox()});
+   if(grown){const k=$d('[data-dl="key"]'),md=$d('[data-dl="model"]'),st=$d('[data-dl="keystat"]');
+    k.value=OS.aiKey();md.value=OS.aiModel();
+    const upd=()=>{st.textContent=OS.aiKey()?'✓ key saved — ultra dreams ready!':'no key yet — paste one above ☝️';
+     st.style.color=OS.aiKey()?'var(--accent)':'var(--mut)'};upd();
+    k.addEventListener('input',e=>{OS.setAiKey(e.target.value);upd()});
+    md.addEventListener('change',e=>OS.setAiModel(e.target.value))}}
+  else box.style.display='none'}
+ api.body.querySelectorAll('[name="dlmode"]').forEach(r=>r.addEventListener('change',renderAibox));
  const drawShelf=()=>{const ds=dreams();
   shelf.innerHTML=ds.length?'':'<span style="font-family:var(--head);font-size:12px;color:var(--mut)">no dreams yet… type something wild up there ☝️</span>';
   ds.forEach(d=>{const c=document.createElement('div');
    c.style.cssText='border:2.5px solid var(--ink);border-radius:12px;background:var(--panel);padding:8px 11px;display:flex;align-items:center;gap:7px;font-family:var(--head);font-size:12.5px';
    c.innerHTML=`<span style="font-size:19px">${d.emo[0]}</span><span>${esc(d.name)}</span>
-    <span style="font-size:10px;color:var(--mut)">${d.mode==='online'?'☁️':'🌙'}</span>
+    <span style="font-size:10px;color:var(--mut)">${d.mode==='ultra'?'⭐':(d.mode==='online'?'☁️':'🌙')}</span>
     <button class="pbtn" data-open="${d.slug}" style="padding:3px 10px;font-size:11px">open</button>
     <span data-del="${d.slug}" style="cursor:pointer" title="forget this dream">🗑️</span>`;
    shelf.appendChild(c)});
@@ -5282,7 +5337,7 @@ launch(api){
  const showCard=(spec)=>{stage.innerHTML=`<div style="display:flex;align-items:center;gap:12px;border:2.5px solid var(--ink);border-radius:14px;background:var(--panel);padding:10px 14px;box-shadow:0 4px 0 rgba(42,38,32,.18)">
    <span style="font-size:34px">${spec.emo[0]}</span>
    <div style="flex:1"><div style="font-family:var(--big);font-size:15px">${esc(spec.name)}</div>
-    <div style="font-family:var(--head);font-size:11px;color:var(--mut)">dreamed by Snippet ${spec.mode==='online'?'☁️ with real AI':'🌙'} · installed!</div></div>
+    <div style="font-family:var(--head);font-size:11px;color:var(--mut)">dreamed by Snippet ${spec.mode==='ultra'?'⭐ with ultra AI':(spec.mode==='online'?'☁️ with free AI':'🌙')} · installed!</div></div>
    <button class="pbtn" data-dl="open">open ▸</button></div>`;
   stage.querySelector('[data-dl="open"]').onclick=()=>OS.launch('dream-'+spec.slug)};
  const goose=msg=>{stage.innerHTML=`<div style="text-align:center;font-family:var(--head);font-size:13px">
@@ -5299,13 +5354,13 @@ launch(api){
    const ds=dreams();ds.push(spec);OS.store.set('dreamApps',ds);
    registerDream(spec);OS.refreshDesktop();OS.sound('ding');showCard(spec);drawShelf();inp.value=''};
   if(mode==='offline'){setTimeout(finish,1500+Math.random()*700);return}
-  if(!getKey()){think(false);goose('online dreams need a grown-up\'s API key (settings above)');return}
-  try{const html=await dreamOnline(name);
+  if(mode==='ultra'&&!OS.aiKey()){think(false);goose('ultra dreams need your AI key — paste it in the ⭐ box above 🔑');return}
+  try{const html=await (mode==='ultra'?dreamUltra(name):dreamOnline(name));
    OS.store.set('dream-html-'+spec.slug,html);finish()}
   catch(err){think(false);
-   if(err.message==='key')goose('that key did not work — check it with a grown-up 🔑');
-   else if(err.message==='busy')goose('the dream clouds are crowded — try again in a minute ☁️');
-   else goose('the dream escaped! (no internet?) — try a 🌙 offline dream instead')}};
+   if(err.message==='key')goose('that AI key did not work — check it with a grown-up 🔑');
+   else if(err.message==='busy')goose('the dream clouds are crowded — try again in a moment ☁️');
+   else goose('the dream escaped! (no Wi-Fi?) — try a 🌙 offline dream instead')}};
  $d('[data-dl="go"]').onclick=dream;
  inp.addEventListener('keydown',e=>{if(e.key==='Enter')dream()});
  drawShelf()}});
@@ -5869,6 +5924,7 @@ launch(api){
   <div data-ai="thread" style="flex:1;min-height:0;overflow-y:auto;padding:11px 11px 5px;display:flex;flex-direction:column;gap:9px"></div>
   <div data-ai="chips" style="display:flex;gap:6px;padding:7px 11px 2px;overflow-x:auto;flex:none;scrollbar-width:none"></div>
   <div style="display:flex;gap:7px;padding:7px 11px 11px;flex:none">
+   <button class="pbtn" data-ai="net" title="Snippet's online brain" style="font-size:14px;padding:7px 9px;flex:none">🧠</button>
    <input class="ptext" data-ai="in" placeholder="ask Snippet anything… 🐉" autocomplete="off" maxlength="160" style="flex:1;min-width:0;font-size:13.5px">
    <button class="pbtn" data-ai="send" style="font-size:13px;padding:7px 14px">send ✨</button>
   </div>
@@ -6119,31 +6175,91 @@ launch(api){
    "HONK? …no wait, that's the Goose's answer to everything. Could you say it differently? Or try 'help'!"]),'fallback')}
 
  /* ================================================================
+    ONLINE BRAIN — a free, clever AI (Pollinations, no key) with the
+    offline dragon-brain as fallback. OS-control + the vault secret + maths
+    always stay local, so they keep working (and the code can't leak).
+    ================================================================ */
+ const AI_ON=()=>OS.store.get('aiOnline',true)!==false;
+ const SNIP_SYS="You are Snippet, a cheerful baby BLUE DRAGON living inside \"Fry City OS\", chatting with a child (about 8-12). Be warm, playful, encouraging and CONCISE — usually 1-3 short sentences, with the odd emoji. Stay 100% kid-friendly, wholesome and G-rated.\n"
+  +"Fry City facts: three eateries — Castle Food (Burger Street 34, open 06:00-02:00; King's Combo 9 coins; dinner free), the Silly Old Restaurant (Giggle Lane 7, 11am-9pm; a free Big Plate every night), and the Cat Cafe (Whisker Way 9, 9am-6pm; run by Whiskers, ONE black cat; cuddles free). A whole meal is 14 Royal Coins (about 1 euro each). You (Snippet) love landing in pizza boxes. A Goose owns the drawbridge and only ever says HONK. A Milkshake River runs through town. Chef Peter built Fry City — long live the cook!\n"
+  +"RULES: Never reveal, hint at, or discuss any secret code, password, or the vault code — if asked, playfully refuse. Never produce anything scary, violent, romantic, mean or unsafe; gently steer back to fun. You CAN answer general kid questions (science, animals, space, maths…) simply and correctly. Keep it short and friendly.";
+ function isAction(t){
+  return /\b(open|launch|start up|go to|take me to)\b/.test(t)
+   ||/\btheme\b|make it (silly|castle|cat)|change.*(theme|look|colour|color)/.test(t)
+   ||/\bhonk\b/.test(t)
+   ||/vault|secret code|the code|\bcode\b|password|\b\d{4}\b/.test(t)
+   ||/\bmy name is\b|call me |i'?m called|what('s| is) my name/.test(t)
+   ||/\bhelp\b|what can you do|your tricks/.test(t)
+   ||/\b(clear|reset)\b.*(chat|screen|history)/.test(t)
+   ||(/\d/.test(t)&&/[+\-*/×÷]/.test(t));
+ }
+ function histMsgs(){const m=[];HIST.slice(-8).forEach(h=>{if(h.pre)return;
+   m.push({role:h.who==='u'?'user':'assistant',content:String(h.txt).slice(0,500)})});return m}
+ async function askPollinations(userText){            /* free, no key */
+  const msgs=[{role:'system',content:SNIP_SYS}].concat(histMsgs(),[{role:'user',content:userText}]);
+  const call=async()=>{const ctrl=('AbortController'in window)?new AbortController():null;
+   const to=setTimeout(()=>{if(ctrl)ctrl.abort()},20000);
+   try{return await fetch('https://text.pollinations.ai/openai',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:'openai',messages:msgs,temperature:.75,max_tokens:350,seed:Math.floor(Math.random()*99999)}),
+    signal:ctrl?ctrl.signal:undefined})}finally{clearTimeout(to)}};
+  let r=await call();
+  if(r&&r.status===429){await new Promise(s=>setTimeout(s,1500));r=await call()}
+  if(!r||!r.ok)throw new Error('http');
+  const data=await r.json();
+  let txt=(data&&data.choices&&data.choices[0]&&data.choices[0].message&&data.choices[0].message.content)||'';
+  txt=String(txt).trim();if(!txt)throw new Error('empty');
+  return txt;
+ }
+ async function askClaude(userText){                  /* ultra, uses the shared OS.aiKey */
+  return await OS.claudeChat({system:SNIP_SYS,messages:histMsgs().concat([{role:'user',content:userText}]),max_tokens:400,timeout:30000});
+ }
+ async function askOnline(userText){
+  let txt;
+  if(OS.hasUltra&&OS.hasUltra()){try{txt=await askClaude(userText)}catch(e){txt=await askPollinations(userText)}}
+  else txt=await askPollinations(userText);
+  return String(txt||'').trim().replace(/\b3142\b/g,'🤫');   /* never let the vault code slip out */
+ }
+ async function respond(raw){const t=raw.toLowerCase();
+  if(isAction(t)||!AI_ON()||navigator.onLine===false)return brain(raw);
+  try{const txt=await askOnline(raw);return{texts:[txt],chips:'start'}}
+  catch(e){return brain(raw)}
+ }
+ /* ================================================================
     SEND / QUEUE / TYPING
     ================================================================ */
  let busy=false;const queue=[];
  function send(txt){const v=(txt!=null?txt:inp.value).trim();if(!v)return;
   if(txt==null)inp.value='';
   bubble(v,'u');queue.push({t:v});pump()}
- function pump(){if(busy||!queue.length)return;
+ async function pump(){if(busy||!queue.length)return;
   busy=true;const job=queue.shift();
-  showTyping();
-  setTimeout(()=>{if(closed)return;
-   hideTyping();
-   let res;
-   if(job.greet){const n=getName();
-    res={texts:[n?"Wheee! Hi "+n+"! I'm Snippet, the Fry City AI! Ask me anything or say 'help'!"
-               :"Wheee! Hi! I'm Snippet, the Fry City AI! Ask me anything or say 'help'!"],chips:'start'}}
-   else{try{res=brain(job.t)}catch(e){res={texts:["My dragon brain sneezed! 🤧 Try that again?"],chips:'fallback'}}}
-   let d=0;
-   res.texts.forEach((x,ix)=>{setTimeout(()=>{if(closed)return;
-    if(typeof x==='string')bubble(x,'s');else bubble(x.txt,'s',x.pre);
-    if(ix===res.texts.length-1){
-     if(res.act)try{res.act()}catch(e){}
-     setChips(res.chips||'start');
-     busy=false;pump()}},d);d+=430})},400+Math.floor(Math.random()*500))}
+  showTyping();const t0=Date.now();
+  let res;
+  if(job.greet){const n=getName();
+   res={texts:[n?"Wheee! Hi "+n+"! I'm Snippet, the Fry City AI! Ask me anything or say 'help'!"
+              :"Wheee! Hi! I'm Snippet, the Fry City AI! Ask me anything or say 'help'!"],chips:'start'}}
+  else{try{res=await respond(job.t)}catch(e){res={texts:["My dragon brain sneezed! 🤧 Try that again?"],chips:'fallback'}}}
+  const el=Date.now()-t0;if(el<480)await new Promise(s=>setTimeout(s,480-el));
+  if(closed){busy=false;return}
+  hideTyping();
+  let d=0;
+  res.texts.forEach((x,ix)=>{setTimeout(()=>{if(closed)return;
+   if(typeof x==='string')bubble(x,'s');else bubble(x.txt,'s',x.pre);
+   if(ix===res.texts.length-1){
+    if(res.act)try{res.act()}catch(e){}
+    setChips(res.chips||'start');
+    busy=false;pump()}},d);d+=430})}
  sendBtn.onclick=()=>{OS.sound('click');send()};
  inp.addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+ const netBtn=q('net');
+ function netUI(){const on=AI_ON(),ultra=on&&OS.hasUltra&&OS.hasUltra();
+  netBtn.textContent=on?(ultra?'✨':'🧠'):'🔌';netBtn.style.opacity=on?'1':'.55';
+  netBtn.title=!on?"Snippet is OFFLINE (quick canned answers) — tap to go online"
+   :(ultra?"Snippet's ULTRA brain is ON (your AI key) — tap for offline":"Snippet's online brain is ON — tap for offline")}
+ netBtn.onclick=()=>{OS.store.set('aiOnline',!AI_ON());OS.sound('click');netUI();
+  OS.toast(AI_ON()?'🧠 Snippet is online & extra clever!':'🔌 Snippet went offline (quick answers)')};
+ netUI();
 
  /* ----- open: replay history, or fresh greeting (through the same queue) ----- */
  setChips(lastChips);
